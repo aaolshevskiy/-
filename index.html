@@ -176,6 +176,7 @@ tr.lnk .badge{box-shadow:0 0 0 2px var(--ok)}
           <div class="field" data-fw="v"><span>Від підлоги</span><input type="number" data-if="v" inputmode="decimal"></div>
           <div class="field" data-fw="d"><span>Глибина</span><input type="number" data-if="d" inputmode="decimal"></div>
         </div>
+        <div id="vertList"></div>
         <div class="row" style="margin-top:12px"><button class="chip" id="revBtn">Відкоси плиткою</button><button class="btn sm" id="itemDel" style="margin-left:auto">Видалити</button></div>
       </div>
       <div class="chips" id="faceRow" style="margin-bottom:10px"></div>
@@ -612,6 +613,19 @@ function wallTiles(i){
   for (const r of wallCovers(i)){ const nx = []; for (const t of tl) for (const q of (r.poly ? subPolyTile(t, r.poly) : subRect(t, r))) nx.push(q); tl = nx; }
   return tl;
 }
+/* ділянка підлоги, на якій стоїть об'єм: там плитка підлоги не кладеться (один шар) */
+function floorContact(b){
+  if (b.kind === 'prism' && b.wall < 0) return b.v <= .5 ? {poly:b.poly} : null;
+  const g = wallGeom(b.wall); let u0, u1;
+  if (b.kind === 'prism'){
+    const P = b.poly, n = P.length; let lo = 1e18, hi = -1e18;
+    for (let k = 0; k < n; k++){ const A = P[k], B = P[(k + 1) % n]; if (A.y < 1 && B.y < 1){ lo = Math.min(lo, A.x, B.x); hi = Math.max(hi, A.x, B.x); } }
+    if (hi - lo < 1) return null; u0 = lo; u1 = hi;
+  } else { if (b.v > .5) return null; u0 = b.u; u1 = b.u + b.w; }
+  const pts = [[u0, 0], [u1, 0], [u1, b.d], [u0, b.d]].map(([u, d]) => ({x:g.a.x + g.d.x * u + g.n.x * d, y:g.a.y + g.d.y * u + g.n.y * d}));
+  if (axisOf(b.wall)){ const xs = pts.map(p => p.x), ys = pts.map(p => p.y); return {rect:{u0:Math.min(...xs), v0:Math.min(...ys), u1:Math.max(...xs), v1:Math.max(...ys)}}; }
+  return {poly:pts};
+}
 let ftCache = {key:'', tiles:[]};
 function floorTiles(){
   const f = S.floor, c = cfg(f);
@@ -628,14 +642,10 @@ function floorTiles(){
   }
   let res = out;
   for (const b of S.boxes){
-    if (b.kind === 'prism'){
-      if (b.wall < 0 && b.v <= .5){ const nx = []; for (const t of res) for (const q of subPolyTile(t, b.poly)) nx.push(q); res = nx; }
-      continue;
-    }
-    if (b.v > .5 || !axisOf(b.wall)) continue;
-    const g = wallGeom(b.wall), p0 = {x:g.a.x + g.d.x * b.u, y:g.a.y + g.d.y * b.u}, p1 = {x:g.a.x + g.d.x * (b.u + b.w) + g.n.x * b.d, y:g.a.y + g.d.y * (b.u + b.w) + g.n.y * b.d};
-    const r = {u0:Math.min(p0.x, p1.x), v0:Math.min(p0.y, p1.y), u1:Math.max(p0.x, p1.x), v1:Math.max(p0.y, p1.y)}, nx = [];
-    for (const t of res) for (const q of subRect(t, r)) nx.push(q);
+    const fp = floorContact(b); if (!fp) continue;
+    const nx = [];
+    if (fp.rect){ for (const t of res) for (const q of subRect(t, fp.rect)) nx.push(q); }
+    else { for (const t of res) for (const q of subPolyTile(t, fp.poly)) nx.push(q); }
     res = nx;
   }
   ftCache = {key, tiles:res};
@@ -873,7 +883,7 @@ function statAll(){
     const add = sel => {
       const sf = sel < 0 ? S.floor : S.walls[sel], c = cfg(sf);
       let a = sel < 0 ? Math.abs(area(S.pts)) / 1e6 : wallGeom(sel).L * S.H / 1e6;
-      if (sel < 0){ for (const b of S.boxes){ if (b.kind === 'prism'){ if (b.wall < 0 && b.v <= .5) a -= Math.abs(area(b.poly)) / 1e6; } else if (b.v <= .5) a -= b.w * b.d / 1e6; } }
+      if (sel < 0){ for (const b of S.boxes){ const fp = floorContact(b); if (!fp) continue; a -= (fp.rect ? (fp.rect.u1 - fp.rect.u0) * (fp.rect.v1 - fp.rect.v0) : Math.abs(area(fp.poly))) / 1e6; } }
       else for (const r of wallCovers(sel)) a -= (r.poly ? Math.abs(area(r.poly)) : (r.u1 - r.u0) * (r.v1 - r.v0)) / 1e6;
       if (!valid(c)) return;
       const tl = sel < 0 ? floorTiles() : wallTiles(sel), k = packTiles(tl, c), nr = narrowStat(tl), P = per[sf.tile];
@@ -1681,6 +1691,41 @@ function itemName(it){
   const same = S.boxes.filter(x => (x.kind === 'inst') === (o.kind === 'inst')), base = o.kind === 'inst' ? 'Інсталяція' : "Об'єм";
   return same.length > 1 ? `${base} ${same.indexOf(o) + 1}` : base;
 }
+function cleanPoly(o){
+  if (!o || o.kind !== 'prism') return;
+  let P = o.poly.map(p => ({x:p.x, y:p.y})), ch = true;
+  while (ch && P.length > 3){
+    ch = false;
+    for (let i = 0; i < P.length; i++){
+      const a = P[(i - 1 + P.length) % P.length], b = P[i], c = P[(i + 1) % P.length];
+      if (Math.hypot(b.x - a.x, b.y - a.y) < 1 || Math.abs((b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x)) < 1){ P.splice(i, 1); ch = true; break; }
+    }
+  }
+  o.poly = P;
+}
+function endEdit(){ const o = getItem(); if (EDIT && o) cleanPoly(o); EDIT = false; ftCache.key = ''; changed(); refreshPanel(); redraw(); }
+function polyValid(o){
+  if (o.wall < 0) return footprintOK(o);
+  const L = wallGeom(o.wall).L; return o.poly.every(p => p.x >= -.5 && p.x <= L + .5 && p.y >= -.5 && p.y <= S.H + .5) && footprintOK(o);
+}
+function renderVerts(it){
+  const box = $('#vertList'); if (!box) return;
+  const show = !!it && EDIT && ITEM.k === 'bx' && it.kind === 'prism';
+  box.style.display = show ? '' : 'none';
+  if (!show || box.contains(document.activeElement)) return;
+  box.innerHTML = '<div class="lbl" style="margin:12px 0 6px">Точки</div>';
+  it.poly.forEach((p, i) => {
+    const r = document.createElement('div'); r.className = 'row'; r.style.cssText = 'gap:6px;margin-bottom:6px';
+    const mk = k => { const inp = document.createElement('input'); inp.type = 'number'; inp.inputMode = 'decimal'; inp.value = Math.round(p[k]); inp.style.minWidth = '0';
+      inp.onchange = () => { const bak = {x:p.x, y:p.y}; p[k] = parseFloat(inp.value) || 0; if (!polyValid(it)){ p.x = bak.x; p.y = bak.y; inp.value = Math.round(p[k]); } changed(); }; return inp; };
+    r.append(mk('x'), mk('y'));
+    const add = document.createElement('button'); add.className = 'chip'; add.textContent = '+'; add.title = 'Додати точку';
+    add.onclick = () => { const q = it.poly[(i + 1) % it.poly.length]; it.poly.splice(i + 1, 0, {x:Math.round((p.x + q.x) / 2), y:Math.round((p.y + q.y) / 2)}); changed(); refreshPanel(); };
+    const del = document.createElement('button'); del.className = 'chip'; del.textContent = '×'; del.disabled = it.poly.length <= 3;
+    del.onclick = () => { if (it.poly.length <= 3) return; const old = it.poly.slice(); it.poly.splice(i, 1); if (!polyValid(it)) it.poly = old; changed(); refreshPanel(); };
+    r.append(add, del); box.appendChild(r);
+  });
+}
 function hasLayout(ref, o){ return ref.k === 'bx' || !!(o && o.rev); }
 function sameItem(a, b){ return !!a && !!b && a.k === b.k && a.i === b.i && (a.k !== 'op' || a.w === b.w); }
 function itemAt(p){
@@ -1695,7 +1740,7 @@ function hideCtx(){ $('#ctx').style.display = 'none'; }
 function startEdit(){
   const o = getItem(); if (!o) return;
   if (V.mode === 'unfold' || (V.mode === 'plan' && ITEM.k === 'op') || (V.mode === 'wall' && ITEM.k === 'bx' && o.wall < 0)) setMode(ITEM.k === 'bx' && o.wall < 0 ? 'plan' : 'wall');
-  EDIT = true; hideCtx(); redraw();
+  EDIT = true; hideCtx(); setTab('layout'); refreshPanel(); redraw();
 }
 function editGeom(){
   const o = getItem(); if (!o || S.none) return null;
@@ -1803,9 +1848,12 @@ function refreshPanel(){
   const it = getItem(), isOp = !!it && ITEM.k === 'op', isBx = !!it && ITEM.k === 'bx', fl = !it && S.sel < 0;
   $('#selTitle').textContent = it ? itemName(ITEM) + (isBx && ITEM.f ? ' · ' + ITEM.f : '') : fl ? 'Підлога' : `Стіна ${S.sel + 1}`;
   $('#itemWrap').style.display = it ? '' : 'none';
+  { const g2 = document.querySelector('#itemWrap .g2'); if (g2) g2.style.display = EDIT ? '' : 'none'; }
   { const fr = $('#faceRow'); fr.innerHTML = ''; fr.style.display = isBx ? '' : 'none';
     if (isBx){ [undefined, ...itemFaces(it).map(f => f.n)].forEach(n => { const b = document.createElement('button'); b.className = 'chip' + (ITEM.f === n ? ' on' : ''); b.textContent = n === undefined ? 'Усі' : n; b.onclick = () => { ITEM = Object.assign({}, ITEM, {f:n}); refreshPanel(); redraw(); }; fr.appendChild(b); }); } }
-  $('#tileBlock').style.display = (isOp && !it.rev) ? 'none' : '';
+  $('#tileBlock').style.display = ((isOp && !it.rev) || (it && EDIT)) ? 'none' : '';
+  $('#faceRow').style.display = (isBx && !EDIT) ? '' : 'none';
+  renderVerts(it);
   $('#wallOnly').style.display = (!it && !fl) ? '' : 'none';
   $('#linkRow').style.display = it ? 'none' : '';
   const row = (a, b) => `<div><span>${a}</span><b>${b}</b></div>`;
@@ -1834,7 +1882,7 @@ function refreshPanel(){
       if (nr.len > 0) html += row('Вузькі', nr.len.toFixed(2) + ' м.п.');
     }
   }
-  $('#stat').innerHTML = html;
+  $('#stat').innerHTML = (it && EDIT) ? '' : html;
   if (!it && !fl) renderItemList();
 }
 function updateTileStats(A){
@@ -2185,7 +2233,7 @@ const pos = e => { const r = cv.getBoundingClientRect(); return {x:e.clientX - r
 cv.oncontextmenu = e => { e.preventDefault(); if (D.active || R.on) return; const hit = itemAt(pos(e)); if (hit){ selectItem(hit); const q = pos(e); showCtx(q.x, q.y); } };
 $('#ctxEdit').onclick = startEdit;
 $('#ctxDel').onclick = () => { hideCtx(); if (getItem()) deleteItem(); };
-$('#editOk').onclick = () => { EDIT = false; redraw(); };
+$('#editOk').onclick = endEdit;
 function planHit(px, py, touch){
   if (S.pts.length < 3) return null;
   for (let i = 0; i < S.pts.length; i++){ const b = badgePos(i); if (Math.hypot(b[0] - px, b[1] - py) < (touch ? 20 : 14)) return {t:'wall', i}; }
@@ -2459,7 +2507,7 @@ window.addEventListener('keydown', e => {
     else if (e.key === 'Shift'){ D.free = true; redraw(); }
     return;
   }
-  if (e.key === 'Escape' && (EDIT || $('#ctx').style.display === 'flex')){ EDIT = false; hideCtx(); redraw(); return; }
+  if (e.key === 'Escape' && (EDIT || $('#ctx').style.display === 'flex')){ hideCtx(); endEdit(); return; }
   if ((e.key === 'Delete' || e.key === 'Backspace') && getItem()){ e.preventDefault(); deleteItem(); return; }
   if ((e.key === 'Delete' || e.key === 'Backspace') && !S.none && S.sel >= 0 && S.pts.length){ e.preventDefault(); deleteWall(S.sel); return; }
   const step = e.shiftKey ? 10 : 1;
